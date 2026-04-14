@@ -1,8 +1,8 @@
 """
 Serialization utilities for Terraform documents.
 
-Provides functions for serializing parsed Terraform documents to JSON
-and YAML formats, with optional pruning of empty values.
+Provides functions for serializing parsed Terraform documents to JSON,
+YAML, and HCL (``.tf``) text, with optional pruning of empty values.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import Any, Dict
 
 from ..graph.graph_builder import create_export
 from ...types import TerraformDocument, TerraformExport
+from .tf_writer import to_tf
 from .yaml import to_yaml
 
 

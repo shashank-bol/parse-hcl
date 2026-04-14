@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -7,7 +8,7 @@ from typing import Any, Dict, List
 from .services.artifact_parsers import TfPlanParser, TfStateParser, TfVarsParser
 from .services.terraform_parser import TerraformParser
 from .utils.output_metadata import annotate_output_metadata
-from .utils.serialization.serializer import to_json, to_json_export, to_yaml_document
+from .utils.serialization.serializer import to_json, to_json_export, to_tf, to_yaml_document
 
 DEFAULT_SINGLE_BASENAME = "parse-hcl-output"
 DEFAULT_COMBINED_BASENAME = "parse-hcl-output.combined"
@@ -16,13 +17,20 @@ DEFAULT_PER_FILE_DIR = "parse-hcl-output/files"
 
 def _usage() -> str:
     return (
-        "Usage: parse-hcl --file <path> | --dir <path> [--format json|yaml] "
-        "[--graph] [--no-prune] [--out <path>] [--out-dir <dir>] [--stdout]"
+        "Usage: parse-hcl --file <path> | --dir <path> [--format json|yaml|tf] "
+        "[--graph] [--no-prune] [--prefer-raw] [--out <path>] [--out-dir <dir>] [--stdout]"
     )
 
 
 def parse_args(argv: list[str]) -> Dict[str, Any]:
-    opts: Dict[str, Any] = {"format": "json", "graph": False, "prune": True, "split": True, "stdout": False}
+    opts: Dict[str, Any] = {
+        "format": "json",
+        "graph": False,
+        "prune": True,
+        "split": True,
+        "stdout": False,
+        "prefer_raw": False,
+    }
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -36,7 +44,7 @@ def parse_args(argv: list[str]) -> Dict[str, Any]:
             continue
         if arg == "--format" and i + 1 < len(argv):
             fmt = argv[i + 1]
-            if fmt in ("json", "yaml"):
+            if fmt in ("json", "yaml", "tf"):
                 opts["format"] = fmt
             i += 2
             continue
@@ -72,6 +80,10 @@ def parse_args(argv: list[str]) -> Dict[str, Any]:
             opts["stdout"] = False
             i += 1
             continue
+        if arg == "--prefer-raw":
+            opts["prefer_raw"] = True
+            i += 1
+            continue
         i += 1
     return opts
 
@@ -97,6 +109,11 @@ def main() -> None:
             return
         if suffix == ".json" and file_str.endswith("plan.json"):
             emit_single(file_path, TfPlanParser().parse_file(str(file_path)), opts)
+            return
+
+        if opts.get("format") == "tf" and suffix == ".json" and not file_str.endswith("plan.json"):
+            payload = json.loads(file_path.read_text(encoding="utf-8"))
+            emit_single(file_path, payload, opts)
             return
 
         doc = parser.parse_file(str(file_path))
@@ -153,16 +170,28 @@ def emit_directory(dir_path: Path, files: List[Dict[str, Any]], combined_doc: Di
 
 
 def _render(data: Any, opts: Dict[str, Any]) -> str:
+    fmt = opts.get("format", "json")
+    if fmt == "tf":
+        return _document_to_tf(data, opts)
+
     if opts.get("graph") and not _is_terraform_doc(data):
         print("Graph export requested but input is not a Terraform document; emitting raw output.", file=sys.stderr)
 
-    if opts.get("format") == "yaml":
+    if fmt == "yaml":
         return to_yaml_document(data, prune_empty=opts.get("prune", True))
 
     if opts.get("graph") and _is_terraform_doc(data):
         return to_json_export(data, prune_empty=opts.get("prune", True))
 
     return to_json(data, prune_empty=opts.get("prune", True))
+
+
+def _document_to_tf(data: Any, opts: Dict[str, Any]) -> str:
+    """Normalize directory/combined wrappers, then serialize to HCL."""
+    doc = data
+    if isinstance(doc, dict) and "combined" in doc:
+        doc = doc["combined"]
+    return to_tf(doc, prefer_raw=bool(opts.get("prefer_raw")))
 
 
 def _resolve_out_path(out: str | None, default_name: str, fmt: str, is_dir_mode: bool = False) -> Path:
@@ -200,7 +229,11 @@ def _write_file(target_path: Path, contents: str) -> None:
 
 
 def _ext(fmt: str) -> str:
-    return ".yaml" if fmt == "yaml" else ".json"
+    if fmt == "yaml":
+        return ".yaml"
+    if fmt == "tf":
+        return ".tf"
+    return ".json"
 
 
 def _is_terraform_doc(data: Any) -> bool:

@@ -96,7 +96,7 @@ from .utils.common.errors import (
 )
 from .utils.graph.graph_builder import build_dependency_graph, create_export
 from .utils.parser.value_classifier import classify_value
-from .utils.serialization.serializer import to_export, to_json, to_json_export, to_yaml_document
+from .utils.serialization.serializer import to_export, to_json, to_json_export, to_tf, to_yaml_document
 
 __all__ = [
     # Parsers
@@ -109,6 +109,7 @@ __all__ = [
     "to_json",
     "to_json_export",
     "to_export",
+    "to_tf",
     "to_yaml_document",
     # Graph
     "build_dependency_graph",
