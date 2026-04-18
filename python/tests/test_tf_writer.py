@@ -210,5 +210,200 @@ class TfWriterIntegrationTest(unittest.TestCase):
             Path(src).unlink(missing_ok=True)
 
 
+_TEMPLATEFILE_LOCAL_TF = '''\
+locals {
+  backend_webapp_container_definitions = templatefile(
+    "./.terraform/modules/tf-modules/templates/ecs/webapp-main.tmpl",
+    {
+      awslogs_group_name    = "/ecs/fargate-webapp-main-${lower(var.env_short_name)}"
+      awslogs_stream_prefix = "ecs"
+      env_short_name        = var.env_short_name
+      region                = var.region
+      ecr_region            = var.region
+      env_name              = lower(var.env_short_name)
+
+      }
+      )
+      }
+module "fargate-django" {
+  source               = "./.terraform/modules/tf-modules/ecs/django"
+  env_short_name       = var.env_short_name
+  backend_webapp = {
+    container_definitions = local.backend_webapp_container_definitions_dynamic
+    target_group_arn      = module.webapp_main_lb.target_group_id
+    cpu                   = 2048
+    memory                = 16384
+  }
+ }
+'''
+
+
+class FunctionCallStructuredRoundTripTest(unittest.TestCase):
+    """``function_call`` emission is driven by ``name`` + ``attributes`` (not raw).
+
+    Parsing the output must preserve every local, module, argument, and map key of
+    the input — confirming the ``templatefile(...)`` call and its nested map survive
+    both directions and that a second parse/emit cycle is idempotent.
+    """
+
+    def setUp(self) -> None:
+        self.parser = TerraformParser()
+
+    def _parse_tf_string(self, tf_text: str) -> dict:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tf", delete=False, encoding="utf-8") as f:
+            f.write(tf_text)
+            path = f.name
+        try:
+            return self.parser.parse_file(path)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_templatefile_call_round_trip_preserves_all_fields(self) -> None:
+        doc = self._parse_tf_string(_TEMPLATEFILE_LOCAL_TF)
+
+        local_val = doc["locals"][0]["value"]
+        self.assertEqual(local_val["kind"], "function_call")
+        self.assertEqual(local_val["name"], "templatefile")
+        self.assertEqual(len(local_val["attributes"]), 2)
+
+        tf_out = to_tf(doc)
+
+        # Output must not be driven by raw — it should look structured and
+        # include the quoted template interpolation, not the raw inner body.
+        self.assertIn('"/ecs/fargate-webapp-main-${lower(var.env_short_name)}"', tf_out)
+        self.assertIn("templatefile(", tf_out)
+        self.assertIn("lower(var.env_short_name)", tf_out)
+
+        doc2 = self._parse_tf_string(tf_out)
+
+        # Whitespace alignment may be reformatted, so we assert structural
+        # equivalence via targeted checks rather than deep dict equality
+        # (``raw`` text captures the original spacing and will differ).
+
+        # Locals / modules retained.
+        self.assertEqual(len(doc2["locals"]), 1)
+        self.assertEqual(len(doc2["module"]), 1)
+
+        # templatefile callee name + args preserved across round trip.
+        v2 = doc2["locals"][0]["value"]
+        self.assertEqual(v2["kind"], "function_call")
+        self.assertEqual(v2["name"], "templatefile")
+        self.assertEqual(len(v2["attributes"]), 2)
+
+        # Every map key in the second arg preserved and in-order.
+        map1 = local_val["attributes"][1]["value"]
+        map2 = v2["attributes"][1]["value"]
+        self.assertEqual(list(map1.keys()), list(map2.keys()))
+
+        # Nested ``lower(...)`` call also keeps its structure.
+        env_name_val = map2["env_name"]
+        self.assertEqual(env_name_val["kind"], "function_call")
+        self.assertEqual(env_name_val["name"], "lower")
+        self.assertEqual(env_name_val["attributes"][0]["raw"], "var.env_short_name")
+
+        # Second emit is byte-identical to first (idempotent).
+        self.assertEqual(to_tf(doc2), tf_out)
+
+    def test_templatefile_round_trip_survives_json_serialization(self) -> None:
+        import json as _json
+
+        doc = self._parse_tf_string(_TEMPLATEFILE_LOCAL_TF)
+        as_json_roundtrip = _json.loads(_json.dumps(doc, default=str))
+
+        tf_out = to_tf(as_json_roundtrip)
+        doc2 = self._parse_tf_string(tf_out)
+
+        self.assertEqual(
+            list(doc["locals"][0]["value"]["attributes"][1]["value"].keys()),
+            list(doc2["locals"][0]["value"]["attributes"][1]["value"].keys()),
+        )
+        self.assertEqual(
+            sorted(doc["module"][0]["properties"].keys()),
+            sorted(doc2["module"][0]["properties"].keys()),
+        )
+
+
+_CHAINED_CALL_TF = '''\
+locals {
+  backend_webapp_container_definitions_dynamic = jsonencode([merge(jsondecode(local.backend_webapp_container_definitions)[0],
+    {
+      environment = concat(
+        jsondecode(local.backend_webapp_container_definitions)[0]["environment"],
+        [
+          {
+            "name" : "ACCESS_LOGS_ENABLED",
+            "value" : "true"
+          }
+        ]
+      )
+    }
+  ), jsondecode(local.backend_webapp_container_definitions)[1], jsondecode(local.backend_webapp_container_definitions)[2]])
+}
+'''
+
+
+class ChainedFunctionCallRoundTripTest(unittest.TestCase):
+    """Round-trip for function calls with index / key accessor chains.
+
+    HCL allows ``jsondecode(x)[0]["k"]`` — the accessor chain after the closing
+    ``)`` was previously dropped on serialize, producing invalid / lossy output.
+    These tests pin the classifier's ``trailer`` capture and the emitter's
+    reconstruction of the full expression (plus idempotent re-emit).
+    """
+
+    def setUp(self) -> None:
+        self.parser = TerraformParser()
+
+    def _parse_tf_string(self, tf_text: str) -> dict:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tf", delete=False, encoding="utf-8") as f:
+            f.write(tf_text)
+            path = f.name
+        try:
+            return self.parser.parse_file(path)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_chained_call_trailers_preserved_on_round_trip(self) -> None:
+        doc = self._parse_tf_string(_CHAINED_CALL_TF)
+        tf_out = to_tf(doc)
+
+        # Every accessor on the jsondecode result must appear verbatim.
+        self.assertIn("jsondecode(local.backend_webapp_container_definitions)[0]", tf_out)
+        self.assertIn('jsondecode(local.backend_webapp_container_definitions)[0]["environment"]', tf_out)
+        self.assertIn("jsondecode(local.backend_webapp_container_definitions)[1]", tf_out)
+        self.assertIn("jsondecode(local.backend_webapp_container_definitions)[2]", tf_out)
+
+        # Re-parse and assert structural invariants + idempotent re-emit.
+        doc2 = self._parse_tf_string(tf_out)
+
+        outer = doc2["locals"][0]["value"]
+        self.assertEqual(outer["kind"], "function_call")
+        self.assertEqual(outer["name"], "jsonencode")
+
+        arr_elems = outer["attributes"][0]["value"]
+        self.assertEqual(len(arr_elems), 3)
+
+        # merge(jsondecode(...)[0], {...})
+        merge_call = arr_elems[0]
+        self.assertEqual(merge_call["name"], "merge")
+        merge_arg0 = merge_call["attributes"][0]
+        self.assertEqual(merge_arg0["name"], "jsondecode")
+        self.assertEqual(merge_arg0["trailer"], "[0]")
+
+        # inside merge's second arg, the environment = concat(...) call has
+        # a jsondecode(...)[0]["environment"] first arg.
+        env_obj = merge_call["attributes"][1]["value"]
+        concat_call = env_obj["environment"]
+        self.assertEqual(concat_call["name"], "concat")
+        self.assertEqual(concat_call["attributes"][0]["trailer"], '[0]["environment"]')
+
+        # sibling elements keep their trailers too
+        self.assertEqual(arr_elems[1]["trailer"], "[1]")
+        self.assertEqual(arr_elems[2]["trailer"], "[2]")
+
+        # Second emit is byte-identical.
+        self.assertEqual(to_tf(doc2), tf_out)
+
+
 if __name__ == "__main__":
     unittest.main()

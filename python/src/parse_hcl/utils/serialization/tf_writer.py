@@ -364,9 +364,9 @@ def _emit_attribute_lines(attrs: Mapping[str, Any], *, indent: int) -> str:
 
 
 def _finish_block(header: str, inner: str) -> str:
-    inner_stripped = inner.strip() if inner else ""
-    if inner_stripped:
-        return f"{header} {{\n{inner_stripped}\n}}"
+    body = (inner or "").rstrip()
+    if body.strip():
+        return f"{header} {{\n{body}\n}}"
     return f"{header} {{\n}}"
 
 
@@ -390,25 +390,91 @@ def _hcl_quote_identifier(s: str) -> str:
     return json.dumps(s)
 
 
-def _emit_expression_value(val: Any) -> str:
+def _emit_expression_value(val: Any, *, _close_indent: int = 0, _depth: int = 0) -> str:
     """
     Emit ``type: expression`` values.
 
-    Quoted interpolations in source HCL (``\"...${}...\"``) are classified as
-    ``kind: template`` with ``raw`` equal to the *inner* string (no surrounding
-    quotes). Those must be emitted as a double-quoted HCL string or Terraform
-    rejects the result. Heredocs (``raw`` starting with ``<<``) are left as-is.
+    Emission is driven by *structured* fields first. ``raw`` is only consulted
+    when the classifier did not record enough structure to synthesize HCL text:
+
+    - ``kind: function_call`` uses ``name`` + ``attributes`` (positional args,
+      recursively emitted via :func:`emit_value`) so edits to the dict are
+      reflected in output. The ``raw`` string is used only as a fallback.
+    - ``kind: template`` re-quotes the stored inner body (classifier strips the
+      surrounding quotes). Heredocs (``raw`` starting with ``<<``) are left as-is.
+    - Other kinds (traversal, splat, for_expr, conditional, unknown) use ``raw``
+      because no fully-structured representation is stored yet.
+
+    ``_close_indent`` is the column of the closing ``)`` / ``}`` for multi-line
+    function calls. Used internally when a nested value forces multi-line layout.
     """
-    raw = val.get("raw") if isinstance(val, dict) else None
-    if raw is None:
+    if not isinstance(val, dict):
         return ""
-    kind = val.get("kind") if isinstance(val, dict) else None
-    raw_str = str(raw)
+
+    kind = val.get("kind")
+    raw = val.get("raw")
+    raw_str = str(raw) if raw is not None else ""
+
+    if kind == "function_call":
+        name = val.get("name")
+        attrs = val.get("attributes")
+        trailer = val.get("trailer") or ""
+        if isinstance(name, str) and name and isinstance(attrs, list):
+            return _emit_function_call(
+                name,
+                attrs,
+                _close_indent=_close_indent,
+                _depth=_depth,
+                trailer=str(trailer),
+            )
+        return raw_str
+
     if kind == "template":
+        if not raw_str:
+            return ""
         if raw_str.lstrip().startswith("<<"):
             return raw_str
         return _hcl_quote_string(raw_str)
+
     return raw_str
+
+
+_SINGLE_LINE_FUNCTION_CALL_BUDGET = 80
+"""Soft cap (chars) for laying out a function call on one line before going multi-line."""
+
+
+def _emit_function_call(
+    name: str,
+    args: Sequence[Any],
+    *,
+    _close_indent: int,
+    _depth: int,
+    trailer: str = "",
+) -> str:
+    """Render ``name(arg1, arg2, ...)<trailer>`` from structured args, multi-lining as needed.
+
+    ``trailer`` is appended verbatim after the closing ``)`` and carries any index
+    / key / attribute accessor chain captured by the classifier (e.g. ``[0]["k"]``).
+    """
+    if not args:
+        return f"{name}(){trailer}"
+
+    arg_indent = _close_indent + 2
+    emitted = [
+        emit_value(arg, _depth=_depth + 1, _close_indent=arg_indent)
+        for arg in args
+    ]
+
+    multiline = any("\n" in piece for piece in emitted)
+    if not multiline:
+        single = f"{name}({', '.join(emitted)}){trailer}"
+        if len(single) <= _SINGLE_LINE_FUNCTION_CALL_BUDGET:
+            return single
+
+    arg_prefix = " " * arg_indent
+    close_prefix = " " * _close_indent
+    body_lines = [f"{arg_prefix}{piece}" for piece in emitted]
+    return f"{name}(\n" + ",\n".join(body_lines) + f"\n{close_prefix}){trailer}"
 
 
 def emit_value(val: Any, *, _depth: int = 0, _close_indent: int = 0) -> str:
@@ -416,8 +482,10 @@ def emit_value(val: Any, *, _depth: int = 0, _close_indent: int = 0) -> str:
     Emit an HCL expression or literal from a parse-hcl Value dict (or plain Python value).
 
     Synthesis follows structured ``type`` / ``value`` (and nested value dicts) first.
-    For ``expression`` values, ``raw`` is used with kind-specific rules: ``template``
-    (quoted-string interpolations) is re-quoted; other kinds use ``raw`` as HCL text.
+    For ``expression`` values the kind-specific emitter (:func:`_emit_expression_value`)
+    prefers structured fields where available (``function_call`` uses ``name`` +
+    ``attributes``; ``template`` re-quotes its inner body) and falls back to ``raw``
+    only for kinds without structured representation.
     Non-expression types fall back to ``raw`` only when structured data is missing.
 
     Object/map values (``type: object``) are written as line-separated blocks
@@ -456,10 +524,7 @@ def emit_value(val: Any, *, _depth: int = 0, _close_indent: int = 0) -> str:
             if not isinstance(elems, list):
                 elems = [] if elems is None else []
             if elems or "value" in val:
-                inner = ", ".join(
-                    emit_value(x, _depth=_depth + 1, _close_indent=0) for x in elems
-                )
-                return f"[{inner}]"
+                return _emit_hcl_array(elems, _depth=_depth + 1, _close_indent=_close_indent)
             if val.get("raw") is not None and str(val.get("raw")).strip() != "":
                 return str(val["raw"])
             return "[]"
@@ -475,15 +540,14 @@ def emit_value(val: Any, *, _depth: int = 0, _close_indent: int = 0) -> str:
             return "{}"
 
         if vtype == "expression":
-            return _emit_expression_value(val)
+            return _emit_expression_value(val, _close_indent=_close_indent, _depth=_depth + 1)
 
         if val.get("raw") is not None and str(val.get("raw")).strip() != "":
             return str(val["raw"])
         return str(val.get("value", ""))
 
     if isinstance(val, list):
-        inner = ", ".join(emit_value(x, _depth=_depth + 1, _close_indent=0) for x in val)
-        return f"[{inner}]"
+        return _emit_hcl_array(val, _depth=_depth + 1, _close_indent=_close_indent)
 
     return str(val)
 
@@ -522,6 +586,42 @@ def _emit_hcl_object(
         lines.append(f"{key_prefix}{lhs} = {rhs}")
     inner = "\n".join(lines)
     return "{\n" + inner + "\n" + close_prefix + "}"
+
+
+_SINGLE_LINE_ARRAY_BUDGET = 80
+"""Soft cap (chars) for keeping an array on one line before switching to multi-line."""
+
+
+def _emit_hcl_array(
+    elements: Sequence[Any],
+    *,
+    _depth: int,
+    _close_indent: int,
+) -> str:
+    """Emit an array. Goes multi-line when any element is multi-line or it's too long.
+
+    Multi-line layout aligns the closing ``]`` with ``_close_indent`` and indents
+    each element at ``_close_indent + 2`` so that nested objects / function
+    calls produced by ``emit_value`` nest correctly inside the array.
+    """
+    if not elements:
+        return "[]"
+
+    elem_indent = _close_indent + 2
+    emitted = [
+        emit_value(x, _depth=_depth + 1, _close_indent=elem_indent) for x in elements
+    ]
+
+    any_multiline = any("\n" in piece for piece in emitted)
+    if not any_multiline:
+        single = f"[{', '.join(emitted)}]"
+        if len(single) <= _SINGLE_LINE_ARRAY_BUDGET:
+            return single
+
+    elem_prefix = " " * elem_indent
+    close_prefix = " " * _close_indent
+    body = ",\n".join(f"{elem_prefix}{piece}" for piece in emitted)
+    return f"[\n{body}\n{close_prefix}]"
 
 
 __all__ = ["to_tf", "emit_value"]

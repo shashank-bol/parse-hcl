@@ -6,7 +6,9 @@ Parses .tf and .tf.json files into structured TerraformDocument objects.
 
 from __future__ import annotations
 
-from typing import List
+import json
+import sys
+from typing import Any, List
 
 from ..parsers.generic_parser import (
     DataParser,
@@ -23,7 +25,28 @@ from ..types import DirectoryParseResult, FileParseResult, TerraformDocument, cr
 from ..utils.common.fs import is_directory, list_terraform_files, path_exists, read_text_file
 from ..utils.common.logger import info
 from ..utils.lexer.block_scanner import BlockScanner
+from ..utils.parser import value_classifier as _value_classifier
 from .terraform_json_parser import TerraformJsonParser
+
+
+def _summarize_parsed(kind: str, parsed: Any) -> str:
+    """One-line summary for verbose logging."""
+    if not isinstance(parsed, dict):
+        return repr(parsed)[:120]
+    if kind == "resource":
+        return f'{parsed.get("type", "?")}.{parsed.get("name", "?")}'
+    if kind == "data":
+        return f'{parsed.get("dataType", "?")}.{parsed.get("name", "?")}'
+    if kind in ("variable", "output", "module", "provider"):
+        return str(parsed.get("name", "?"))
+    if kind == "locals":
+        return f'local:{parsed.get("name", "?")}'
+    if kind == "terraform":
+        return "terraform { ... }"
+    if kind in ("moved", "import", "check", "terraform_data", "unknown"):
+        labels = parsed.get("labels") or []
+        return f'{parsed.get("type", kind)} {labels}'
+    return kind
 
 
 class TerraformParser:
@@ -47,8 +70,16 @@ class TerraformParser:
         ...     print(f"{resource['type']}.{resource['name']}")
     """
 
-    def __init__(self) -> None:
-        """Initializes the TerraformParser with all required sub-parsers."""
+    def __init__(self, *, verbose: int = 0) -> None:
+        """
+        Initializes the TerraformParser with all required sub-parsers.
+
+        Args:
+            verbose: Logging verbosity for parsing (stderr). ``0`` = off, ``1`` = steps
+                (block scan, kind, labels, summaries), ``2+`` = also print each parsed
+                block as JSON (can be large).
+        """
+        self._verbose = max(0, verbose)
         self.scanner = BlockScanner()
         self.variable_parser = VariableParser()
         self.output_parser = OutputParser()
@@ -60,6 +91,39 @@ class TerraformParser:
         self.terraform_settings_parser = TerraformSettingsParser()
         self.generic_block_parser = GenericBlockParser()
         self.json_parser = TerraformJsonParser()
+
+    def _log_verbose(self, message: str) -> None:
+        if self._verbose >= 1:
+            print("[parser:verbose]", message, file=sys.stderr)
+
+    def _log_parsed_block(
+        self,
+        kind: str,
+        index: int,
+        total: int,
+        parsed: Any,
+        *,
+        sub: int | None = None,
+        subs: int | None = None,
+    ) -> None:
+        scope = f"block {index + 1}/{total}"
+        if sub is not None and subs is not None:
+            scope = f"{scope} local {sub}/{subs}"
+        if self._verbose >= 1:
+            labels = ""
+            if isinstance(parsed, dict) and parsed.get("labels") is not None:
+                labels = f" labels={parsed.get('labels')}"
+            self._log_verbose(f"{scope} kind={kind}{labels} -> {_summarize_parsed(kind, parsed)}")
+        if self._verbose >= 2:
+            title = f"parsed {scope} ({kind})"
+            print(f"[parser:trace] === {title} ===", file=sys.stderr)
+            print(json.dumps(parsed, indent=2, default=str), file=sys.stderr)
+
+    def _log_document_summary(self, document: TerraformDocument) -> None:
+        if self._verbose < 1:
+            return
+        parts = [f"{k}={len(document.get(k, []))}" for k in document if isinstance(document.get(k), list)]
+        self._log_verbose("document summary: " + ", ".join(parts))
 
     def parse_file(self, file_path: str) -> TerraformDocument:
         """
@@ -85,43 +149,93 @@ class TerraformParser:
         """
         if file_path.endswith(".tf.json"):
             info(f"Parsing Terraform JSON file: {file_path}")
-            return self.json_parser.parse_file(file_path)
+            self._log_verbose(f"scan: Terraform JSON (native) path={file_path}")
+            _value_classifier.set_reference_logging(self._verbose)
+            try:
+                document = self.json_parser.parse_file(file_path)
+            finally:
+                _value_classifier.set_reference_logging(0)
+            self._log_document_summary(document)
+            if self._verbose >= 2:
+                print("[parser:trace] === full document (.tf.json) ===", file=sys.stderr)
+                print(json.dumps(document, indent=2, default=str), file=sys.stderr)
+            return document
 
         info(f"Parsing Terraform file: {file_path}")
         content = read_text_file(file_path)
-        blocks = self.scanner.scan(content, file_path)
-        document = create_empty_document()
+        _value_classifier.set_reference_logging(self._verbose)
+        try:
+            blocks = self.scanner.scan(content, file_path, verbose=self._verbose)
+            self._log_verbose(f"scan: found {len(blocks)} top-level block(s) in {file_path}")
+            document = create_empty_document()
 
-        for block in blocks:
-            kind = block["kind"]
-            if kind == "variable":
-                document["variable"].append(self.variable_parser.parse(block))
-            elif kind == "output":
-                document["output"].append(self.output_parser.parse(block))
-            elif kind == "locals":
-                document["locals"].extend(self.locals_parser.parse(block))
-            elif kind == "module":
-                document["module"].append(self.module_parser.parse(block))
-            elif kind == "provider":
-                document["provider"].append(self.provider_parser.parse(block))
-            elif kind == "resource":
-                document["resource"].append(self.resource_parser.parse(block))
-            elif kind == "data":
-                document["data"].append(self.data_parser.parse(block))
-            elif kind == "terraform":
-                document["terraform"].append(self.terraform_settings_parser.parse(block))
-            elif kind == "moved":
-                document["moved"].append(self.generic_block_parser.parse(block))
-            elif kind == "import":
-                document["import"].append(self.generic_block_parser.parse(block))
-            elif kind == "check":
-                document["check"].append(self.generic_block_parser.parse(block))
-            elif kind == "terraform_data":
-                document["terraform_data"].append(self.generic_block_parser.parse(block))
-            else:
-                document["unknown"].append(self.generic_block_parser.parse(block))
+            total = len(blocks)
+            for block_index, block in enumerate(blocks):
+                kind = block["kind"]
 
-        return document
+                if kind == "variable":
+                    parsed = self.variable_parser.parse(block)
+                    document["variable"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "output":
+                    parsed = self.output_parser.parse(block)
+                    document["output"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "locals":
+                    locals_list = self.locals_parser.parse(block)
+                    n_locals = len(locals_list)
+                    for j, local in enumerate(locals_list):
+                        document["locals"].append(local)
+                        self._log_parsed_block(kind, block_index, total, local, sub=j + 1, subs=n_locals)
+                elif kind == "module":
+                    parsed = self.module_parser.parse(block)
+                    document["module"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "provider":
+                    parsed = self.provider_parser.parse(block)
+                    document["provider"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "resource":
+                    parsed = self.resource_parser.parse(block)
+                    document["resource"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "data":
+                    parsed = self.data_parser.parse(block)
+                    document["data"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "terraform":
+                    parsed = self.terraform_settings_parser.parse(block)
+                    document["terraform"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "moved":
+                    parsed = self.generic_block_parser.parse(block)
+                    document["moved"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "import":
+                    parsed = self.generic_block_parser.parse(block)
+                    document["import"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "check":
+                    parsed = self.generic_block_parser.parse(block)
+                    document["check"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                elif kind == "terraform_data":
+                    parsed = self.generic_block_parser.parse(block)
+                    document["terraform_data"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+                else:
+                    parsed = self.generic_block_parser.parse(block)
+                    document["unknown"].append(parsed)
+                    self._log_parsed_block(kind, block_index, total, parsed)
+
+            self._log_document_summary(document)
+            if self._verbose >= 2:
+                print("[parser:trace] === full document (merged) ===", file=sys.stderr)
+                print(json.dumps(document, indent=2, default=str), file=sys.stderr)
+
+            return document
+        finally:
+            _value_classifier.set_reference_logging(0)
 
     def parse_directory(self, dir_path: str, aggregate: bool = True, include_per_file: bool = True) -> DirectoryParseResult:
         """
@@ -155,9 +269,16 @@ class TerraformParser:
             raise ValueError(f"Invalid directory path: {dir_path}")
 
         files = list_terraform_files(dir_path)
+        self._log_verbose(f"directory scan: {len(files)} file(s) under {dir_path}")
         parsed_files: List[FileParseResult] = [{"path": file_path, "document": self.parse_file(file_path)} for file_path in files]
 
         combined = self.combine([item["document"] for item in parsed_files]) if aggregate else None
+        if aggregate and combined is not None and self._verbose >= 1:
+            self._log_verbose("--- combined document ---")
+            self._log_document_summary(combined)
+            if self._verbose >= 2:
+                print("[parser:trace] === combined document (all files) ===", file=sys.stderr)
+                print(json.dumps(combined, indent=2, default=str), file=sys.stderr)
         result: DirectoryParseResult = {"files": parsed_files if include_per_file else []}
         if combined is not None:
             result["combined"] = combined

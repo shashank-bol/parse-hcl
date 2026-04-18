@@ -18,7 +18,8 @@ DEFAULT_PER_FILE_DIR = "parse-hcl-output/files"
 def _usage() -> str:
     return (
         "Usage: parse-hcl --file <path> | --dir <path> [--format json|yaml|tf] "
-        "[--graph] [--no-prune] [--prefer-raw] [--out <path>] [--out-dir <dir>] [--stdout]"
+        "[-v | -vv | --verbose | --trace] [--graph] [--no-prune] [--prefer-raw] "
+        "[--out <path>] [--out-dir <dir>] [--stdout]"
     )
 
 
@@ -30,6 +31,7 @@ def parse_args(argv: list[str]) -> Dict[str, Any]:
         "split": True,
         "stdout": False,
         "prefer_raw": False,
+        "verbose": 0,
     }
     i = 0
     while i < len(argv):
@@ -84,13 +86,25 @@ def parse_args(argv: list[str]) -> Dict[str, Any]:
             opts["prefer_raw"] = True
             i += 1
             continue
+        if arg == "--verbose":
+            opts["verbose"] = opts.get("verbose", 0) + 1
+            i += 1
+            continue
+        if arg in ("--trace", "--trace-dicts"):
+            opts["verbose"] = max(opts.get("verbose", 0), 2)
+            i += 1
+            continue
+        if len(arg) >= 2 and arg[0] == "-" and arg[1:] and all(c == "v" for c in arg[1:]):
+            opts["verbose"] = opts.get("verbose", 0) + len(arg) - 1
+            i += 1
+            continue
         i += 1
     return opts
 
 
 def main() -> None:
     opts = parse_args(sys.argv[1:])
-    parser = TerraformParser()
+    parser = TerraformParser(verbose=int(opts.get("verbose") or 0))
 
     if not opts.get("file") and not opts.get("dir"):
         print(_usage(), file=sys.stderr)

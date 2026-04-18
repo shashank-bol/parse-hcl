@@ -119,6 +119,12 @@ class ExpressionValuesTest(unittest.TestCase):
         result = classify_value("length(var.list)")
         self.assertEqual(result["type"], "expression")
         self.assertEqual(result["kind"], "function_call")
+        self.assertEqual(result["name"], "length")
+        attrs = result["attributes"]
+        self.assertEqual(len(attrs), 1)
+        self.assertEqual(attrs[0]["type"], "expression")
+        self.assertEqual(attrs[0]["kind"], "traversal")
+        self.assertEqual(attrs[0]["raw"], "var.list")
 
     def test_template_expressions(self) -> None:
         result = classify_value('"${var.name}-suffix"')
@@ -232,6 +238,97 @@ class TypeConstraintParserTest(unittest.TestCase):
         self.assertEqual(result["elements"][0]["base"], "string")
         self.assertEqual(result["elements"][1]["base"], "number")
         self.assertEqual(result["elements"][2]["base"], "bool")
+
+
+class FunctionCallArgumentsTest(unittest.TestCase):
+    """Tests for recursively-classified ``function_call`` arguments."""
+
+    def test_mixed_argument_kinds(self) -> None:
+        result = classify_value('func("somestr", [1, 2, 3], {a = 1, b = 2})')
+        self.assertEqual(result["kind"], "function_call")
+        self.assertEqual(result["name"], "func")
+
+        attrs = result["attributes"]
+        self.assertEqual(len(attrs), 3)
+
+        self.assertEqual(attrs[0]["type"], "literal")
+        self.assertEqual(attrs[0]["value"], "somestr")
+
+        self.assertEqual(attrs[1]["type"], "array")
+        self.assertEqual([e["value"] for e in attrs[1]["value"]], [1, 2, 3])
+
+        self.assertEqual(attrs[2]["type"], "object")
+        self.assertEqual(attrs[2]["value"]["a"]["value"], 1)
+        self.assertEqual(attrs[2]["value"]["b"]["value"], 2)
+
+    def test_nested_function_calls_are_recursively_classified(self) -> None:
+        result = classify_value('merge(tomap({x = 1}), var.tags, lookup(local.m, "k", "def"))')
+        self.assertEqual(result["name"], "merge")
+        attrs = result["attributes"]
+        self.assertEqual(len(attrs), 3)
+
+        self.assertEqual(attrs[0]["kind"], "function_call")
+        self.assertEqual(attrs[0]["name"], "tomap")
+        self.assertEqual(attrs[0]["attributes"][0]["type"], "object")
+
+        self.assertEqual(attrs[1]["kind"], "traversal")
+        self.assertEqual(attrs[1]["raw"], "var.tags")
+
+        self.assertEqual(attrs[2]["kind"], "function_call")
+        self.assertEqual(attrs[2]["name"], "lookup")
+        lookup_attrs = attrs[2]["attributes"]
+        self.assertEqual(len(lookup_attrs), 3)
+        self.assertEqual(lookup_attrs[0]["raw"], "local.m")
+        self.assertEqual(lookup_attrs[1]["value"], "k")
+        self.assertEqual(lookup_attrs[2]["value"], "def")
+
+    def test_empty_argument_list(self) -> None:
+        result = classify_value("uuid()")
+        self.assertEqual(result["name"], "uuid")
+        self.assertEqual(result["attributes"], [])
+
+    def test_commas_inside_strings_and_brackets_are_preserved(self) -> None:
+        result = classify_value('format("a,b,%s", [1, 2, 3], {k = "x,y"})')
+        attrs = result["attributes"]
+        self.assertEqual(len(attrs), 3)
+        self.assertEqual(attrs[0]["value"], "a,b,%s")
+        self.assertEqual(len(attrs[1]["value"]), 3)
+        self.assertEqual(attrs[2]["value"]["k"]["value"], "x,y")
+
+    def test_trailing_comma_is_tolerated(self) -> None:
+        result = classify_value("concat(var.a, var.b,)")
+        self.assertEqual(len(result["attributes"]), 2)
+
+    def test_namespaced_function_name(self) -> None:
+        result = classify_value('provider::aws::arn_parse("arn:aws:s3:::bucket")')
+        self.assertEqual(result["kind"], "function_call")
+        self.assertEqual(result["name"], "provider::aws::arn_parse")
+        self.assertEqual(len(result["attributes"]), 1)
+        self.assertEqual(result["attributes"][0]["value"], "arn:aws:s3:::bucket")
+
+    def test_function_call_with_index_accessor_trailer(self) -> None:
+        result = classify_value("jsondecode(local.x)[0]")
+        self.assertEqual(result["kind"], "function_call")
+        self.assertEqual(result["name"], "jsondecode")
+        self.assertEqual(result["trailer"], "[0]")
+        self.assertEqual(len(result["attributes"]), 1)
+        self.assertEqual(result["attributes"][0]["raw"], "local.x")
+
+    def test_function_call_with_chained_key_and_index_accessors(self) -> None:
+        result = classify_value('jsondecode(local.x)[0]["environment"]')
+        self.assertEqual(result["kind"], "function_call")
+        self.assertEqual(result["name"], "jsondecode")
+        self.assertEqual(result["trailer"], '[0]["environment"]')
+
+    def test_function_call_with_dotted_attribute_trailer(self) -> None:
+        result = classify_value("tolist(var.s).attr")
+        self.assertEqual(result["kind"], "function_call")
+        self.assertEqual(result["name"], "tolist")
+        self.assertEqual(result["trailer"], ".attr")
+
+    def test_function_call_without_trailer_omits_field(self) -> None:
+        result = classify_value("length(var.list)")
+        self.assertNotIn("trailer", result)
 
 
 if __name__ == "__main__":

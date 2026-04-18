@@ -3,6 +3,10 @@ Logging utilities for HCL parsing.
 
 Provides simple logging functions with level-based filtering controlled
 by the TF_PARSER_DEBUG environment variable.
+
+For **step-by-step parse logs and JSON dumps** of parsed blocks, use the CLI flags
+``-v`` / ``-vv`` / ``--verbose`` / ``--trace`` (see ``TerraformParser(..., verbose=…)``),
+which print to stderr as ``[parser:verbose]`` and ``[parser:trace]``.
 """
 
 from __future__ import annotations

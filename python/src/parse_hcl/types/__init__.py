@@ -223,13 +223,24 @@ class ArrayValue(TypedDict, total=False):
 
 
 class ExpressionValue(TypedDict, total=False):
-    """An expression value (traversals, function calls, templates, etc.)."""
+    """An expression value (traversals, function calls, templates, etc.).
+
+    When ``kind == "function_call"`` the classifier additionally populates:
+
+    - ``name``: callee identifier (supports dotted / ``::`` namespaced names).
+    - ``attributes``: positional arguments recursively classified as ``Value``.
+    - ``trailer``: optional raw accessor chain applied to the call result, e.g.
+      ``[0]["environment"]`` in ``jsondecode(local.x)[0]["environment"]``.
+    """
 
     type: Literal["expression"]
     kind: ExpressionKind
     raw: str
     references: Optional[List[ReferenceDict]]
     parsed: Optional[Dict[str, Any]]
+    name: str
+    attributes: List["Value"]
+    trailer: str
 
 
 # General Value type for runtime use
@@ -250,6 +261,9 @@ class Value(TypedDict, total=False):
     kind: ExpressionKind
     references: List[ReferenceDict]
     parsed: Dict[str, Any]
+    name: str
+    attributes: List["Value"]
+    trailer: str
 
 
 # =============================================================================

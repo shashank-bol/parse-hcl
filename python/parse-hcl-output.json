@@ -1,0 +1,109 @@
+{
+  "terraform": [
+    {
+      "properties": {
+        "required_version": {
+          "type": "literal",
+          "value": ">= 1.0.0",
+          "raw": "\">= 1.0.0\""
+        }
+      },
+      "raw": "terraform {\n  required_version = \">= 1.0.0\"\n}",
+      "source": "/Users/shashanksingh/Documents/GitHub/parse-hcl/python/tests/fixtures/main.tf"
+    }
+  ],
+  "provider": [
+    {
+      "name": "aws",
+      "properties": {
+        "region": {
+          "type": "literal",
+          "value": "us-east-1",
+          "raw": "\"us-east-1\""
+        }
+      },
+      "raw": "provider \"aws\" {\n  region = \"us-east-1\"\n}",
+      "source": "/Users/shashanksingh/Documents/GitHub/parse-hcl/python/tests/fixtures/main.tf"
+    }
+  ],
+  "variable": [
+    {
+      "name": "region",
+      "description": "Region",
+      "type": "string",
+      "typeConstraint": {
+        "base": "string",
+        "raw": "string"
+      },
+      "default": {
+        "type": "literal",
+        "value": "us-east-1",
+        "raw": "\"us-east-1\""
+      },
+      "raw": "variable \"region\" {\n  type = string\n  default = \"us-east-1\"\n  description = \"Region\"\n}",
+      "source": "/Users/shashanksingh/Documents/GitHub/parse-hcl/python/tests/fixtures/main.tf"
+    }
+  ],
+  "output": [
+    {
+      "name": "bucket_name",
+      "value": {
+        "type": "expression",
+        "kind": "unknown",
+        "raw": "aws_s3_bucket.demo[0].bucket",
+        "references": [
+          {
+            "kind": "resource",
+            "resource_type": "aws_s3_bucket",
+            "name": "demo",
+            "attribute": "bucket"
+          }
+        ]
+      },
+      "sensitive": false,
+      "raw": "output \"bucket_name\" {\n  value = aws_s3_bucket.demo[0].bucket\n  sensitive = false\n}",
+      "source": "/Users/shashanksingh/Documents/GitHub/parse-hcl/python/tests/fixtures/main.tf"
+    }
+  ],
+  "resource": [
+    {
+      "type": "aws_s3_bucket",
+      "name": "demo",
+      "properties": {
+        "bucket": {
+          "type": "expression",
+          "kind": "template",
+          "raw": "${local.name_prefix}-bucket",
+          "references": [
+            {
+              "kind": "local",
+              "name": "name_prefix"
+            }
+          ]
+        }
+      },
+      "meta": {
+        "count": {
+          "type": "literal",
+          "value": 2,
+          "raw": "2"
+        }
+      },
+      "raw": "resource \"aws_s3_bucket\" \"demo\" {\n  bucket = \"${local.name_prefix}-bucket\"\n  count = 2\n}",
+      "source": "/Users/shashanksingh/Documents/GitHub/parse-hcl/python/tests/fixtures/main.tf"
+    }
+  ],
+  "locals": [
+    {
+      "name": "name_prefix",
+      "type": "literal",
+      "value": {
+        "type": "literal",
+        "value": "demo",
+        "raw": "\"demo\""
+      },
+      "raw": "\"demo\"",
+      "source": "/Users/shashanksingh/Documents/GitHub/parse-hcl/python/tests/fixtures/main.tf"
+    }
+  ]
+}
