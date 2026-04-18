@@ -405,5 +405,58 @@ class ChainedFunctionCallRoundTripTest(unittest.TestCase):
         self.assertEqual(to_tf(doc2), tf_out)
 
 
+_PAREN_WRAPPED_CONDITIONAL_TF = '''\
+module "combined" {
+  source                         = "./mod"
+  webapp_log_group               = (var.env_type == "PROD" ? "/ecs/fargate-webapp-main-${lower(var.env_short_name)}" : "/ecs/fargate-webapp-combined-webapp-${lower(var.env_short_name)}")
+  engine_log_group               = (var.env_type == "PROD" ? "/ecs/fargate-engine-${lower(var.env_short_name)}" : "/ecs/fargate-webapp-combined-engine-${lower(var.env_short_name)}")
+}
+'''
+
+
+class ParenWrappedConditionalRoundTripTest(unittest.TestCase):
+    """A ``(cond ? a : b)`` expression must round-trip verbatim (no string-wrap).
+
+    Regression: previously emitted with the whole expression re-quoted as a
+    string and every inner ``"`` escaped, producing invalid HCL like
+    ``webapp_log_group = "(var.env_type == \\\"PROD\\\" ? ...)"``.
+    """
+
+    def setUp(self) -> None:
+        self.parser = TerraformParser()
+
+    def _parse_tf_string(self, tf_text: str) -> dict:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".tf", delete=False, encoding="utf-8") as f:
+            f.write(tf_text)
+            path = f.name
+        try:
+            return self.parser.parse_file(path)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_paren_wrapped_conditional_emits_without_quote_wrapping(self) -> None:
+        doc = self._parse_tf_string(_PAREN_WRAPPED_CONDITIONAL_TF)
+
+        webapp = doc["module"][0]["properties"]["webapp_log_group"]
+        self.assertEqual(webapp["kind"], "conditional")
+
+        tf_out = to_tf(doc)
+
+        # Must emit as a bare conditional expression, NOT a quote-wrapped string.
+        self.assertIn(
+            'webapp_log_group = (var.env_type == "PROD" ? '
+            '"/ecs/fargate-webapp-main-${lower(var.env_short_name)}" : '
+            '"/ecs/fargate-webapp-combined-webapp-${lower(var.env_short_name)}")',
+            tf_out,
+        )
+        # Sanity: the whole line must not have been collapsed into a single string literal.
+        self.assertNotIn('webapp_log_group = "(var.env_type', tf_out)
+        self.assertNotIn('\\"PROD\\"', tf_out)
+
+        doc2 = self._parse_tf_string(tf_out)
+        self.assertEqual(doc2["module"][0]["properties"]["webapp_log_group"]["kind"], "conditional")
+        self.assertEqual(to_tf(doc2), tf_out)
+
+
 if __name__ == "__main__":
     unittest.main()

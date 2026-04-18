@@ -331,5 +331,45 @@ class FunctionCallArgumentsTest(unittest.TestCase):
         self.assertNotIn("trailer", result)
 
 
+class ParenWrappedExpressionTest(unittest.TestCase):
+    """Grouping parens must not change expression-kind detection.
+
+    Regression: ``(cond ? a : b)`` used to be classified as ``template`` because
+    ``_has_conditional_operator`` saw ``?`` at paren-depth 1 (not 0), so detection
+    fell through to the ``${`` template fallback and the emitter wrapped the whole
+    expression in quotes / escaped every inner ``"``.
+    """
+
+    def test_paren_wrapped_conditional_is_detected_as_conditional(self) -> None:
+        raw = (
+            '(var.env_type == "PROD" '
+            '? "/ecs/fargate-webapp-main-${lower(var.env_short_name)}" '
+            ': "/ecs/fargate-webapp-combined-webapp-${lower(var.env_short_name)}")'
+        )
+        result = classify_value(raw)
+        self.assertEqual(result["type"], "expression")
+        self.assertEqual(result["kind"], "conditional")
+        # ``raw`` retains the outer parens so the serializer can emit verbatim.
+        self.assertTrue(result["raw"].startswith("("))
+        self.assertTrue(result["raw"].endswith(")"))
+
+    def test_bare_conditional_still_detected_without_parens(self) -> None:
+        result = classify_value('var.enabled ? "yes" : "no"')
+        self.assertEqual(result["kind"], "conditional")
+
+    def test_paren_wrapped_traversal_detected_as_traversal(self) -> None:
+        result = classify_value("(var.region)")
+        self.assertEqual(result["kind"], "traversal")
+
+    def test_paren_wrapped_function_call_detected_as_function_call(self) -> None:
+        result = classify_value("(length(var.list))")
+        self.assertEqual(result["kind"], "function_call")
+
+    def test_two_separate_paren_groups_not_stripped(self) -> None:
+        # ``(a) + (b)`` must not be treated as if wrapped by one outer pair.
+        result = classify_value("(var.a) + (var.b)")
+        self.assertNotEqual(result["kind"], "function_call")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -391,25 +391,54 @@ def _detect_expression_kind(raw: str) -> ExpressionKind:
     """
     Detects the kind of an expression based on its syntax.
 
+    Grouping parens (``(expr)``) are peeled off for classification so that
+    paren-wrapped expressions like ``(cond ? a : b)`` are recognized as
+    ``conditional`` rather than falling through to the ``${`` template fallback
+    (which would cause the emitter to re-quote the whole thing as a string).
+
+    ``conditional`` is checked before the ``${`` template fallback because
+    templates only appear inside quoted strings / heredocs at the top level;
+    callers have already routed those via ``classify_value`` before we get here,
+    so any ``${`` seen now is an interpolation embedded inside a string literal
+    that is part of a larger expression.
+
     Args:
         raw: The raw expression string.
 
     Returns:
         The detected ExpressionKind.
     """
-    if FUNCTION_CALL_NAME_PATTERN.match(raw):
+    probe = _strip_outer_parens(raw)
+
+    if FUNCTION_CALL_NAME_PATTERN.match(probe):
         return "function_call"
-    if "${" in raw:
-        return "template"
-    if _has_conditional_operator(raw):
+    if _has_conditional_operator(probe):
         return "conditional"
-    if re.match(r"^\[\s*for\s+.+\s+in\s+.+:\s+", raw) or re.match(r"^\{\s*for\s+.+\s+in\s+.+:\s+", raw):
+    if re.match(r"^\[\s*for\s+.+\s+in\s+.+:\s+", probe) or re.match(r"^\{\s*for\s+.+\s+in\s+.+:\s+", probe):
         return "for_expr"
-    if SPLAT_PATTERN.search(raw):
+    if SPLAT_PATTERN.search(probe):
         return "splat"
-    if re.match(r"^[\w.-]+(\[[^\]]*])?$", raw):
+    if re.match(r"^[\w.-]+(\[[^\]]*])?$", probe):
         return "traversal"
+    if "${" in probe:
+        return "template"
     return "unknown"
+
+
+def _strip_outer_parens(raw: str) -> str:
+    """
+    Return ``raw`` with a single pair of balanced outer parentheses removed.
+
+    Returns the original ``raw`` (after ``strip``) if there is no fully-enclosing
+    pair (e.g. ``(a) + (b)`` — the leading ``(`` closes before end-of-string).
+    """
+    s = raw.strip()
+    if len(s) < 2 or s[0] != "(" or s[-1] != ")":
+        return raw
+    close = _find_matching_paren(s, 0)
+    if close != len(s) - 1:
+        return raw
+    return s[1:-1].strip()
 
 
 def _has_conditional_operator(raw: str) -> bool:
