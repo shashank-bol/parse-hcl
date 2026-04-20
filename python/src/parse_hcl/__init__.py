@@ -97,8 +97,13 @@ from .utils.common.errors import (
 from .utils.graph.graph_builder import build_dependency_graph, create_export
 from .utils.parser.value_classifier import classify_value
 from .utils.serialization.serializer import to_export, to_json, to_json_export, to_tf, to_yaml_document
+# OOP model: the full class hierarchy lives in ``parse_hcl.oop`` to avoid
+# shadowing the existing TypedDict names re-exported above.
+from .oop import TerraformModule
 
 __all__ = [
+    # OOP model
+    "TerraformModule",
     # Parsers
     "TerraformParser",
     "TerraformJsonParser",
